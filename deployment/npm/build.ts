@@ -56,6 +56,11 @@ const packages: Package[] = [{
   os: "linux",
   cpu: "loong64",
   libc: "glibc",
+}, {
+  zipFileName: "dprint-loongarch64-unknown-linux-musl.zip",
+  os: "linux",
+  cpu: "loong64",
+  libc: "musl",
 }];
 
 const markdownText = `# dprint
