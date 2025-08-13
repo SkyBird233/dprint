@@ -59,7 +59,7 @@ const profileDataItems: ProfileData[] = [{
   cross: true,
 }, {
   os: OperatingSystem.Linux,
-  target: "loong64-unknown-linux-gnu",
+  target: "loongarch64-unknown-linux-gnu",
   cross: true,
 }];
 const profiles = profileDataItems.map(profile => {
