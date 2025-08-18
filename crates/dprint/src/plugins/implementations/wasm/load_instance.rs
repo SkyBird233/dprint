@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::bail;
 use anyhow::Result;
 use dprint_core::plugins::CancellationToken;
-use wasmer::sys::Cranelift;
+use wasmer::sys::LLVM;
 use wasmer::sys::EngineBuilder;
 use wasmer::EngineRef;
 use wasmer::ExportError;
@@ -94,7 +94,7 @@ pub struct WasmModuleCreator {
 
 impl Default for WasmModuleCreator {
   fn default() -> Self {
-    let compiler = Cranelift::default();
+    let compiler = LLVM::default();
     let engine = EngineBuilder::new(compiler).engine();
     let engine: wasmer::Engine = engine.into();
     Self { engine }
