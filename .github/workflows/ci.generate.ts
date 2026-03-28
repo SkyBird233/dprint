@@ -1,6 +1,15 @@
 #!/usr/bin/env -S deno run -A
 import $ from "jsr:@david/dax@0.45.0";
-import { conditions, createWorkflow, defineMatrix, expr, type ExpressionValue, isLinting, job, step } from "jsr:@david/gagen@0.2.18";
+import {
+  conditions,
+  createWorkflow,
+  defineMatrix,
+  expr,
+  type ExpressionValue,
+  isLinting,
+  job,
+  step,
+} from "jsr:@david/gagen@0.2.18";
 
 enum OperatingSystem {
   Mac = "macOS-latest",
@@ -58,15 +67,19 @@ const profileDataItems: ProfileData[] = [{
   cross: true,
 }];
 
-const profiles = profileDataItems.map(profile => {
+const profiles = profileDataItems.map((profile) => {
   return {
     ...profile,
-    zipChecksumEnvVarName: `ZIP_CHECKSUM_${profile.target.toUpperCase().replaceAll("-", "_")}`,
+    zipChecksumEnvVarName: `ZIP_CHECKSUM_${
+      profile.target.toUpperCase().replaceAll("-", "_")
+    }`,
     get installerChecksumEnvVarName() {
       if (profile.target !== "x86_64-pc-windows-msvc") {
         throw new Error("Check for windows x86_64 before accessing.");
       }
-      return `INSTALLER_CHECKSUM_${profile.target.toUpperCase().replaceAll("-", "_")}`;
+      return `INSTALLER_CHECKSUM_${
+        profile.target.toUpperCase().replaceAll("-", "_")
+      }`;
     },
     artifactsName: `${profile.target}-artifacts`,
     zipFileName: `dprint-${profile.target}.zip`,
@@ -83,7 +96,7 @@ const isTag = conditions.isTag();
 const isNotTag = isTag.not();
 
 const matrix = defineMatrix({
-  include: profileDataItems.map(profile => ({
+  include: profileDataItems.map((profile) => ({
     os: profile.os as string,
     run_tests: (profile.runTests ?? false).toString(),
     target: profile.target,
@@ -137,7 +150,8 @@ const setupRust = step({
 }, {
   name: "Setup cross",
   if: isCross,
-  run: "cargo install cross --git https://github.com/cross-rs/cross --rev 36c0d7810ddde073f603c82d896c2a6c886ff7a4",
+  run:
+    "cargo install cross --git https://github.com/cross-rs/cross --rev 36c0d7810ddde073f603c82d896c2a6c886ff7a4",
 }).dependsOn(checkout).comesAfter(setupDeno);
 
 const lint = step.if(isLinuxGnu.and(isNotTag))(
@@ -158,6 +172,41 @@ const aarch64LinkerEnv = {
   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: "aarch64-linux-gnu-gcc",
 };
 
+// llvm-sys uses cross-compiled llvm-config to detect LLVM
+const setupQemu = step({
+  uses: "docker/setup-qemu-action@v4",
+  if: matrix.target.startsWith("loongarch64").and(isCross),
+}).comesAfter(setupRust);
+const setupBuildx = step({
+  uses: "docker/setup-buildx-action@v4",
+}).dependsOn(setupQemu);
+
+// Bypass cross and build images with GHA cache enabled
+const crossImageBaseName = "dprint-cross-base";
+const crossImageName = `${crossImageBaseName}-${matrix.target}`;
+const loongarch64ImageEnv = Object.fromEntries(
+  profiles.filter((profile) => profile.target.startsWith("loongarch64"))
+    .map((
+      profile,
+    ) => [
+      `CROSS_TARGET_${profile.target.toUpperCase().replaceAll("-", "_")}_IMAGE`,
+      `${crossImageBaseName}-${profile.target}`,
+    ]),
+);
+const buildAndCacheCrossImages = step({
+  uses: "docker/build-push-action@v7",
+  if: matrix.target.startsWith("loongarch64").and(isCross),
+  with: {
+    file: "loongarch64.Dockerfile",
+    tags: crossImageName,
+    load: true,
+    "cache-from": `type=gha,scope=${crossImageName}`,
+    "cache-to": `type=gha,mode=max,scope=${crossImageName}`,
+    "build-args":
+      `CROSS_BASE_IMAGE=ghcr.io/cross-rs/${matrix.target}:main\nTARGET=${matrix.target}`,
+  },
+}).dependsOn(setupBuildx);
+
 const buildDebug = step({
   name: "Build (Debug)",
   if: isCross.not(),
@@ -166,8 +215,9 @@ const buildDebug = step({
 }, {
   name: "Build cross (Debug)",
   if: isCross,
+  env: loongarch64ImageEnv,
   run: `cross build -p dprint --locked --target ${matrix.target}`,
-}).dependsOn(setupRust);
+}).dependsOn(setupRust, buildAndCacheCrossImages);
 const buildRelease = step({
   name: "Build (Release)",
   if: isCross.not(),
@@ -176,15 +226,17 @@ const buildRelease = step({
 }, {
   name: "Build cross (Release)",
   if: isCross,
+  env: loongarch64ImageEnv,
   run: `cross build -p dprint --locked --target ${matrix.target} --release`,
-}).dependsOn(setupRust);
+}).dependsOn(setupRust, buildAndCacheCrossImages);
 
 const tests = step(
   // debug
   step.if(runDebugTests).dependsOn(buildDebug)(
     step({
       name: "Build test plugins (Debug)",
-      run: `cargo build -p test-process-plugin --locked --target ${matrix.target}`,
+      run:
+        `cargo build -p test-process-plugin --locked --target ${matrix.target}`,
     }),
     step({
       name: "Test (Debug)",
@@ -200,11 +252,13 @@ const tests = step(
   step.if(runTests.and(isTag)).dependsOn(buildRelease)(
     step({
       name: "Build test plugins (Release)",
-      run: `cargo build -p test-process-plugin --locked --target ${matrix.target} --release`,
+      run:
+        `cargo build -p test-process-plugin --locked --target ${matrix.target} --release`,
     }),
     step({
       name: "Test (Release)",
-      run: `cargo test --locked --target ${matrix.target} --all-features --release`,
+      run:
+        `cargo test --locked --target ${matrix.target} --all-features --release`,
     }),
   ),
 );
@@ -213,7 +267,11 @@ const createInstaller = step.dependsOn(buildRelease)({
   name: "Create installer (Windows x86_64)",
   uses: "joncloud/makensis-action@v2.0",
   if: matrix.target.equals("x86_64-pc-windows-msvc").and(isTag),
-  with: { "script-file": `${expr("github.workspace")}/deployment/installer/dprint-installer.nsi` },
+  with: {
+    "script-file": `${
+      expr("github.workspace")
+    }/deployment/installer/dprint-installer.nsi`,
+  },
 });
 
 function getPreReleaseStepForProfile(profile: typeof profiles[0]) {
@@ -272,9 +330,11 @@ const uploadArtifacts = step(...profiles.map((profile) => {
     );
   }
   const preReleaseStep = getPreReleaseStepForProfile(profile);
-  buildJobOutputs[profile.zipChecksumEnvVarName] = preReleaseStep.outputs.ZIP_CHECKSUM;
+  buildJobOutputs[profile.zipChecksumEnvVarName] =
+    preReleaseStep.outputs.ZIP_CHECKSUM;
   if (profile.target === "x86_64-pc-windows-msvc") {
-    buildJobOutputs[profile.installerChecksumEnvVarName] = preReleaseStep.outputs.INSTALLER_CHECKSUM;
+    buildJobOutputs[profile.installerChecksumEnvVarName] =
+      preReleaseStep.outputs.INSTALLER_CHECKSUM;
   }
   return step.dependsOn(preReleaseStep)({
     name: `Upload artifacts (${profile.target})`,
@@ -349,12 +409,18 @@ const draftReleaseJob = job("draft_release", {
     }),
     step({
       name: "Output checksums",
-      run: profiles.map(profile => {
+      run: profiles.map((profile) => {
         const output = [
-          `echo "${profile.zipFileName}: ${buildJob.outputs[profile.zipChecksumEnvVarName]}"`,
+          `echo "${profile.zipFileName}: ${
+            buildJob.outputs[profile.zipChecksumEnvVarName]
+          }"`,
         ];
         if (profile.target === "x86_64-pc-windows-msvc") {
-          output.push(`echo "${profile.installerFileName}: ${buildJob.outputs[profile.installerChecksumEnvVarName]}"`);
+          output.push(
+            `echo "${profile.installerFileName}: ${
+              buildJob.outputs[profile.installerChecksumEnvVarName]
+            }"`,
+          );
         }
         return output;
       }).flat(),
@@ -364,10 +430,16 @@ const draftReleaseJob = job("draft_release", {
       run: profiles.map((profile, i) => {
         const op = i === 0 ? ">" : ">>";
         const output = [
-          `echo "${buildJob.outputs[profile.zipChecksumEnvVarName]} ${profile.zipFileName}" ${op} SHASUMS256.txt`,
+          `echo "${
+            buildJob.outputs[profile.zipChecksumEnvVarName]
+          } ${profile.zipFileName}" ${op} SHASUMS256.txt`,
         ];
         if (profile.target === "x86_64-pc-windows-msvc") {
-          output.push(`echo "${buildJob.outputs[profile.installerChecksumEnvVarName]} ${profile.installerFileName}" >> SHASUMS256.txt`);
+          output.push(
+            `echo "${
+              buildJob.outputs[profile.installerChecksumEnvVarName]
+            } ${profile.installerFileName}" >> SHASUMS256.txt`,
+          );
         }
         return output;
       }).flat(),
@@ -380,7 +452,7 @@ const draftReleaseJob = job("draft_release", {
       },
       with: {
         files: [
-          ...profiles.map(profile => {
+          ...profiles.map((profile) => {
             const output = [
               `${profile.artifactsName}/${profile.zipFileName}`,
             ];
@@ -406,13 +478,19 @@ Run \`dprint upgrade\` or see https://dprint.dev/install/
 |Artifact|SHA-256 Checksum|
 |:--|:--|
 ${
-          profiles.map(profile => {
+          profiles.map((profile) => {
             const output: [string, string][] = [
-              [profile.zipFileName, `${buildJob.outputs[profile.zipChecksumEnvVarName]}`],
+              [
+                profile.zipFileName,
+                `${buildJob.outputs[profile.zipChecksumEnvVarName]}`,
+              ],
             ];
             if (profile.target === "x86_64-pc-windows-msvc") {
               output.push(
-                [profile.installerFileName, `${buildJob.outputs[profile.installerChecksumEnvVarName]}`],
+                [
+                  profile.installerFileName,
+                  `${buildJob.outputs[profile.installerChecksumEnvVarName]}`,
+                ],
               );
             }
             return output.map(([name, checksum]) => `|${name}|${checksum}|`);
